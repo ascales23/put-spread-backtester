@@ -197,11 +197,28 @@ def test_prob_otm_is_n_d2_and_display_only():
 
 
 def test_no_sizing_module_imports_prob_otm():
-    """Guardrail: N(d2) must not reach sizing or expectancy (STRATEGY.md section 7)."""
+    """Guardrail: N(d2) must not reach sizing, expectancy, or the hard filters
+    (STRATEGY.md section 7). Checked on the parsed import graph rather than on the
+    source text, so the modules stay free to explain in prose why they refuse it."""
+    import ast
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parents[1] / "src" / "putspread"
     for name in ("portfolio.py", "metrics.py", "filters.py"):
         f = root / name
-        if f.exists():
-            assert "prob_otm_rn" not in f.read_text(), f"{name} must not use risk-neutral N(d2)"
+        if not f.exists():
+            continue
+        tree = ast.parse(f.read_text())
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        }
+        assert "prob_otm_rn" not in imported, f"{name} must not import risk-neutral N(d2)"
+        called = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "prob_otm_rn" not in called, f"{name} must not call risk-neutral N(d2)"
