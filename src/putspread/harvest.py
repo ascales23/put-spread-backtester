@@ -125,6 +125,22 @@ def harvest(
                 "win": int(trade.pnl > 0),
                 # The strategy dies from its left tail, so the tail gets its own label.
                 "big_loss": int(trade.pnl < -0.5 * trade.max_loss_per_contract),
+                # Maximum adverse / favourable excursion, in dollars for a 1-lot, and
+                # as a multiple of the credit received. Credit multiples are the unit
+                # a stop is actually written in ("close at 2x credit"), so they are
+                # what the stop study needs.
+                "mae": trade.mae,
+                "mfe": trade.mfe,
+                "mae_credit_mult": (
+                    -trade.mae / (trade.credit_per_share * 100.0)
+                    if trade.credit_per_share > 0 else float("nan")
+                ),
+                "mfe_credit_mult": (
+                    trade.mfe / (trade.credit_per_share * 100.0)
+                    if trade.credit_per_share > 0 else float("nan")
+                ),
+                "days_in_trade": trade.days_in_trade,
+                "exit_quote_real": int(trade.exit_quote_real),
                 **feats,
             })
 

@@ -85,6 +85,11 @@ class ClosedTrade:
     mfe: float
     move_sigma: float
     prob_otm_display: float
+    #: False when the exit price came from Black-Scholes rather than a live quote.
+    #: For a stop-loss study this matters more than anywhere else: the whole value of
+    #: a stop is the price you actually get out at, and a modelled exit price is an
+    #: assumption wearing the costume of a fill.
+    exit_quote_real: bool = True
 
     @property
     def risk_dollars(self) -> float:
@@ -171,6 +176,7 @@ class Portfolio:
     def close_position(
         self, pos: OpenPosition, exit_date: date, exit_debit_per_share: float,
         exit_spot: float, reason: str, exit_commission: float,
+        exit_quote_real: bool = True,
     ) -> ClosedTrade:
         """Pay the debit to close and book the realized trade."""
         self.cash -= exit_debit_per_share * 100.0 * pos.contracts + exit_commission
@@ -191,6 +197,7 @@ class Portfolio:
             days_in_trade=(exit_date - pos.entry_date).days,
             mae=pos.worst_mark, mfe=pos.best_mark,
             move_sigma=pos.move_sigma, prob_otm_display=pos.prob_otm_display,
+            exit_quote_real=exit_quote_real,
         )
         self.closed.append(trade)
         self.positions.remove(pos)

@@ -60,11 +60,15 @@ class BacktestContext:
         return cls(provider=provider, bars=bars, rates=rates, calendar=calendar)
 
 
-def run_backtest(cfg: StrategyConfig, ctx: BacktestContext, fills: FillConfig) -> BacktestResult:
+def run_backtest(
+    cfg: StrategyConfig, ctx: BacktestContext, fills: FillConfig,
+    trade_filter=None, entry_selector=None,
+) -> BacktestResult:
     """One parameter set, one fill assumption, one pass over the path."""
     return Backtester(
         provider=ctx.provider, bars={s: ctx.bars[s] for s in cfg.symbols}, cfg=cfg,
         fills=fills, rates=ctx.rates, calendar=ctx.calendar, data_caveats=list(ctx.caveats),
+        trade_filter=trade_filter, entry_selector=entry_selector,
     ).run()
 
 

@@ -361,3 +361,18 @@ def test_leverage_does_not_change_per_contract_max_loss():
     n = p.size_position(750.0, 100_000)
     assert n * 750.0 <= cfg.max_margin_utilization * 100_000
     assert pos(max_loss_per_contract=750.0, contracts=n).risk_dollars == 750.0 * n
+
+
+def test_early_exit_can_be_forced_to_wait_for_a_real_quote():
+    """A stop is only worth what you get out at. When the chain does not quote the
+    position's strikes, the mark is a model number and closing on it invents a fill.
+    With require_real_quotes_for_exit the exit defers instead."""
+    from putspread.exits import MarkState, evaluate_exits
+
+    cfg = StrategyConfig(profit_target_pct=0.50, require_earnings_data=False,
+                         require_real_quotes_for_exit=True)
+    modelled = MarkState(spot=100.0, debit_to_close=0.10, short_mid=None,
+                         days_to_expiry=10, quotes_are_real=False)
+    # The RULE still fires -- the engine is what declines to act on it.
+    assert evaluate_exits(pos(), modelled, cfg) == "profit_target"
+    assert modelled.quotes_are_real is False

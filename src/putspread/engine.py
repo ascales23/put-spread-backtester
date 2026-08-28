@@ -149,7 +149,8 @@ class Backtester:
     ) -> ClosedTrade:
         exit_commission = self.fills.commissions_per_contract(2, 1) * pos.contracts
         return self.portfolio.close_position(
-            pos, d, mark.debit_to_close, mark.spot, reason, exit_commission
+            pos, d, mark.debit_to_close, mark.spot, reason, exit_commission,
+            exit_quote_real=mark.quotes_are_real,
         )
 
     def simulate_isolated(self, pos: OpenPosition) -> ClosedTrade | None:
@@ -249,6 +250,11 @@ class Backtester:
                     continue
                 reason = evaluate_exits(pos, mark, self.cfg)
                 if reason:
+                    if self.cfg.require_real_quotes_for_exit and not mark.quotes_are_real:
+                        # The rule fired, but there is no market to fill against
+                        # today. Booking a Black-Scholes price here would be
+                        # inventing the very number the exit rule is judged on.
+                        continue
                     self._close_early(pos, d, mark, reason)
 
             # 2. Entries.

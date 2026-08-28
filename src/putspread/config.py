@@ -61,6 +61,12 @@ class StrategyConfig:
     stop_credit_multiple: float = 2.0        # mark-to-market loss >= N x credit
     time_stop_dte: int | None = None         # close at N DTE regardless
     model_early_assignment: bool = True
+    #: Only act on an early-exit rule when the position's strikes are actually quoted
+    #: that day. The chain sample is thin, so a mark often falls back to
+    #: Black-Scholes -- and closing at a modelled price is an assumption, not a fill.
+    #: Setting this True defers the exit to the next day with a real two-sided market,
+    #: which is what an account would actually experience.
+    require_real_quotes_for_exit: bool = False
 
     # --- filters (section 6)
     require_earnings_data: bool = True       # fail loudly rather than trade blind

@@ -177,6 +177,68 @@ unfiltered ($11,946 vs $15,194). At 8x it makes far more ($114,681 vs $93,917), 
 10x nearly double ($144,507 vs $87,860). Its value is drawdown reduction, and
 compounding rewards that superlinearly.
 
+## Stops and profit targets
+
+```bash
+python scripts/mae_analysis.py --out runs/mae            # where a stop belongs
+python -m scripts.run_exit_study --leverage 4 --out runs/exits
+```
+
+**Maximum adverse excursion says a stop should work.** On unmanaged trades, in
+multiples of credit received:
+
+| | p25 | p50 | p75 | p90 |
+|---|---|---|---|---|
+| Winners' MAE | 0.00x | **0.14x** | 0.72x | 1.63x |
+| Losers' MAE | 2.02x | **3.26x** | 5.09x | 5.96x |
+
+Only 3.8% of winners ever reach the median loser's depth. A stop at 2.5x credit would
+catch 63% of losers while cutting 5.2% of winners — **12 losers caught per winner
+lost**. Textbook separation.
+
+**And in the backtest it looks spectacular.** At 4x with the ML filter:
+
+| Exit rule | Trades | P&L | PF | Sharpe | Max DD |
+|---|---|---|---|---|---|
+| PT50, no stop (previous best) | 214 | $50,356 | 1.40 | 0.49 | −23.7% |
+| PT50 + stop 2.5x credit | 223 | $74,807 | 1.50 | 0.73 | −20.6% |
+| PT50 + stop 2.5x + time stop 3 DTE | 224 | $94,335 | 1.76 | 0.95 | −13.0% |
+| PT50 + **level-break** stop | 243 | **−$23,855** | 0.75 | −0.23 | −35.2% |
+| Hold to expiry, no stop | 180 | $40,187 | 1.30 | 0.42 | −33.2% |
+
+### Why those numbers should not be believed
+
+**95% of those exits are priced off Black-Scholes, not off a market.** This chain
+source quotes a given (strike, expiry) pair on only a fraction of days, so once a
+position is open its exact contract is usually not quoted again until expiry. The
+mark falls back to the model, and closing on a model price is an assumption wearing
+the costume of a fill.
+
+`require_real_quotes_for_exit=True` makes every early exit wait for a real two-sided
+market. The result:
+
+| Exit rule | Modelled exits | Stops fired | PT exits | Expiry exits | P&L @4x | Sharpe |
+|---|---|---|---|---|---|---|
+| PT50 + stop 2.5x, model marks OK | 89% | 18 | 191 | 14 | $74,807 | 0.73 |
+| PT50 + stop 2.5x, **real quotes only** | 0% | **1** | **9** | 172 | $58,952 | 0.53 |
+
+The stop fires **once in 182 trades**. The profit target fires 9 times instead of 191.
+Average hold goes from 6.8 days to 13.7 — the full 14 DTE. Forced onto real quotes,
+every managed variant collapses into hold-to-expiry, and the remaining P&L difference
+is one trade's knock-on effect on capital, not a stop-loss edge.
+
+**Conclusion: this dataset cannot answer the stop-loss question.** Not because stops
+don't work — the MAE separation suggests they should — but because per-contract daily
+quotes are needed to model intra-trade management at all, and this source does not
+have them. The same paid-data upgrade that would settle the 2025 confound would settle
+this too.
+
+One finding *is* robust, because it triggers on the underlying rather than on option
+quotes: **the level-break stop is actively destructive.** Closing when price shuts
+below support turns a 92% win rate into 53% and −$23,855. The level gets breached
+intraday constantly; stopping there converts winners into losses. The thesis
+invalidation rule in §5 is the one exit that should not be used.
+
 ## Layout
 
 ```
