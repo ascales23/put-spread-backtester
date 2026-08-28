@@ -42,7 +42,9 @@ class EarningsCalendar:
     def symbol_events(self, symbol: str) -> pd.DataFrame:
         return self.events[self.events["symbol"] == symbol]
 
-    def assert_covers(self, symbol: str, start: date, end: date) -> None:
+    def assert_covers(
+        self, symbol: str, start: date, end: date, allow_no_events: bool = False
+    ) -> None:
         """Raise unless this symbol has calendar coverage spanning [start, end].
 
         Coverage is judged on the FILE's global span, not the symbol's own event
@@ -58,6 +60,12 @@ class EarningsCalendar:
                 f"{start}..{end}; refusing to trade {symbol} through dates where "
                 "earnings are unknown (STRATEGY.md section 6.1)"
             )
+        if allow_no_events:
+            # An index ETF genuinely never reports, so an empty result is the true
+            # answer rather than a gap. The caller must say so explicitly -- silence
+            # here would let a mistyped single-name ticker trade blind through
+            # earnings, which is the exact failure section 6.1 forbids.
+            return
         if self.symbol_events(symbol).empty:
             raise EarningsDataMissing(
                 f"no earnings events at all for {symbol} inside a covered window "

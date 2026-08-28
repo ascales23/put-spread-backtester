@@ -64,12 +64,18 @@ class StrategyConfig:
 
     # --- filters (section 6)
     require_earnings_data: bool = True       # fail loudly rather than trade blind
+    #: Instruments that genuinely never report. Listing one here is an assertion that
+    #: its empty earnings history is a fact, not a data gap.
+    non_reporting_symbols: tuple[str, ...] = (
+        "SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "SMH", "ARKK", "TLT", "GLD",
+    )
     block_earnings_inside_expiry: bool = True
     min_open_interest: int = 100
     min_volume: int = 20
     max_spread_pct_of_mid: float = 0.12
     min_bid: float = 0.05                    # a leg with no real bid cannot be traded
     acknowledge_missing_oi_volume: bool = False
+    max_parity_deviation: float = 0.02       # skip days whose chain disagrees with the close
     max_move_sigma: float = 1.5              # section 6.4 move-plausibility flag
     block_implausible_move: bool = False     # section 6.4 says flag, not necessarily block
 
@@ -80,7 +86,11 @@ class StrategyConfig:
 
     # --- portfolio (section 4)
     starting_equity: float = 100_000.0
-    max_portfolio_risk_pct: float = 0.02     # total open max-loss / equity
+    # Section 4 caps risk at two levels. The per-position cap is the spec's stated
+    # "1-2% per position"; the portfolio cap is the account-level total it insists
+    # must also be enforced. Setting them equal would silently allow only one open
+    # position at a time, which is a very different strategy from the one specified.
+    max_portfolio_risk_pct: float = 0.10     # total open max-loss / equity
     max_risk_per_position_pct: float = 0.02
     max_concurrent_positions: int = 10
     one_position_per_symbol: bool = True

@@ -176,3 +176,15 @@ def test_prob_otm_is_recorded_as_display_only(amd_worked_example_chain):
     key = "prob_otm_risk_neutral_display"
     assert key in cand.diagnostics
     assert 0.0 < cand.diagnostics[key] < 1.0
+
+
+def test_etf_with_no_earnings_must_be_declared_explicitly(amd_earnings_calendar):
+    """An index ETF never reports, but an unknown ticker with no events is a bug.
+    The calendar must not conflate the two."""
+    from putspread.earnings import EarningsDataMissing
+
+    cal = amd_earnings_calendar
+    lo, hi = date(2026, 5, 5), date(2026, 11, 3)
+    with pytest.raises(EarningsDataMissing, match="symbol-mapping"):
+        cal.assert_covers("SPY", lo, hi)
+    cal.assert_covers("SPY", lo, hi, allow_no_events=True)   # declared, so allowed

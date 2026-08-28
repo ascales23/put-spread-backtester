@@ -42,6 +42,9 @@ class ParquetChainProvider(ChainProvider):
         self._groups: dict[str, dict[tuple[date, date], pd.DataFrame]] = {}
         self._spots: dict[str, dict[date, float]] = {}
         self._chain_cache: dict[tuple[str, date, date], ExpiryChain] = {}
+        self._ohlcv_cache: dict[str, pd.DataFrame | None] = {}
+        self._expirations: dict[str, dict[date, list[date]]] = {}
+        self._dates: dict[str, list[date]] = {}
 
     # ---------------------------------------------------------------- loading
 
@@ -62,18 +65,25 @@ class ParquetChainProvider(ChainProvider):
             self._groups[symbol] = {
                 key: g for key, g in self._frames[symbol].groupby(["date", "expiration"], sort=False)
             }
+            # Precomputed date -> expirations. Scanning the frame on every call would
+            # be O(rows) per lookup, and a sweep makes millions of these lookups
+            # against a multi-million-row frame.
+            exp_map: dict[date, list[date]] = {}
+            for as_of, expiration in self._groups[symbol]:
+                exp_map.setdefault(as_of, []).append(expiration)
+            self._expirations[symbol] = {k: sorted(v) for k, v in exp_map.items()}
+            self._dates[symbol] = sorted(exp_map)
         return self._frames[symbol]
 
     # ---------------------------------------------------------------- interface
 
     def trading_dates(self, symbol: str, start: date, end: date) -> list[date]:
-        df = self._frame(symbol)
-        ds = df.loc[(df["date"] >= start) & (df["date"] <= end), "date"]
-        return sorted(ds.unique().tolist())
+        self._frame(symbol)
+        return [d for d in self._dates[symbol] if start <= d <= end]
 
     def expirations(self, symbol: str, as_of: date) -> list[date]:
-        df = self._frame(symbol)
-        return sorted(df.loc[df["date"] == as_of, "expiration"].unique().tolist())
+        self._frame(symbol)
+        return self._expirations[symbol].get(as_of, [])
 
     def chain(self, symbol: str, as_of: date, expiration: date) -> ExpiryChain | None:
         key = (symbol, as_of, expiration)
@@ -96,22 +106,31 @@ class ParquetChainProvider(ChainProvider):
         self._chain_cache[key] = ch
         return ch
 
-    def spot(self, symbol: str, as_of: date) -> float | None:
-        """RAW underlying price, recovered from the chain by put-call parity.
+    def _ohlcv(self, symbol: str) -> pd.DataFrame | None:
+        """Raw daily bars for `symbol`, or None when no OHLCV file was supplied."""
+        if symbol in self._ohlcv_cache:
+            return self._ohlcv_cache[symbol]
+        path = self.ohlcv_dir / f"{symbol}.parquet" if self.ohlcv_dir else None
+        if path is None or not path.exists():
+            self._ohlcv_cache[symbol] = None
+            return None
+        px = pd.read_parquet(path)
+        px["date"] = pd.to_datetime(px["date"]).dt.date
+        px = px.set_index("date").sort_index()
+        for c in ("open", "high", "low", "close"):
+            px[c] = pd.to_numeric(px[c], errors="coerce").astype(float)
+        self._ohlcv_cache[symbol] = px
+        return px
 
-        Deliberately NOT read from a price vendor: vendor history is split-adjusted
-        while option strikes are not, so a back-adjusted close silently misprices
-        every trade before a split. Parity uses the same quotes being traded, so the
-        two can never disagree about what a share cost that day.
-        """
+    def parity_spot(self, symbol: str, as_of: date) -> float | None:
+        """Underlying price recovered from the chain by put-call parity."""
         cache = self._spots.setdefault(symbol, {})
         if as_of in cache:
             return cache[as_of]
         r = self.rates.get(as_of)
         best: float | None = None
         for exp in self.expirations(symbol, as_of):
-            dte = (exp - as_of).days
-            if dte < 7:
+            if (exp - as_of).days < 7:
                 continue          # near-expiry parity is noisy; skip the front week
             ch = self.chain(symbol, as_of, exp)
             if ch is None:
@@ -119,42 +138,54 @@ class ParquetChainProvider(ChainProvider):
             s = implied_spot_from_parity(ch, r)
             if s is not None and s > 0:
                 best = s
-                break             # first (nearest) usable expiry is the most liquid
+                break             # the nearest usable expiry is the most liquid
         cache[as_of] = best
         return best
+
+    def spot(self, symbol: str, as_of: date) -> float | None:
+        """RAW (split-unadjusted) underlying close, aligned with historical strikes.
+
+        The vendor OHLCV is verified unadjusted -- NVDA prints 1224 the day before its
+        2024 ten-for-one split and 121 the day after -- so it can be used directly
+        against historical strikes. Parity is kept as an independent cross-check
+        (`parity_deviation`) rather than as the price itself, because parity inherits
+        the staleness of end-of-day option mids and would import that noise into every
+        strike distance and every solved IV.
+        """
+        px = self._ohlcv(symbol)
+        if px is not None and as_of in px.index:
+            return float(px.loc[as_of, "close"])
+        return self.parity_spot(symbol, as_of)
+
+    def parity_deviation(self, symbol: str, as_of: date) -> float | None:
+        """|parity spot / quoted close - 1| for this date, or None if not computable.
+
+        A large deviation means the day's chain does not agree with where the stock
+        actually closed -- stale or crossed end-of-day marks. Entries on such a day
+        would be priced off quotes that never existed, so the engine skips them.
+        """
+        px = self._ohlcv(symbol)
+        if px is None or as_of not in px.index:
+            return None
+        parity = self.parity_spot(symbol, as_of)
+        close = float(px.loc[as_of, "close"])
+        if parity is None or close <= 0:
+            return None
+        return abs(parity / close - 1.0)
 
     # ---------------------------------------------------------------- extras
 
     def daily_bars(self, symbol: str) -> pd.DataFrame:
-        """Raw daily OHLC for support detection, indexed by date.
+        """Raw daily OHLC for support detection, restricted to days with a chain.
 
-        Prefers the vendor OHLCV file when present, but rescales it onto the RAW
-        (parity) price level date by date, so highs and lows stay consistent with the
-        strikes even across splits. Without a file it falls back to a parity-derived
-        close-only frame, which still supports the donchian and sma rules.
+        Falls back to a parity-derived close-only frame when no OHLCV file exists,
+        which still supports the donchian and sma support rules.
         """
-        parity = pd.Series(
-            {d: self.spot(symbol, d) for d in self.trading_dates(symbol, date.min, date.max)}
-        ).dropna()
+        chain_days = set(self.trading_dates(symbol, date.min, date.max))
+        px = self._ohlcv(symbol)
+        if px is not None:
+            out = px.loc[px.index.isin(chain_days), ["open", "high", "low", "close"]]
+            return out.dropna()
+        parity = pd.Series({d: self.parity_spot(symbol, d) for d in sorted(chain_days)}).dropna()
         parity.index = pd.Index(parity.index, name="date")
-
-        path = self.ohlcv_dir / f"{symbol}.parquet" if self.ohlcv_dir else None
-        if path is None or not path.exists():
-            return pd.DataFrame(
-                {"open": parity, "high": parity, "low": parity, "close": parity}
-            )
-
-        px = pd.read_parquet(path)
-        px["date"] = pd.to_datetime(px["date"]).dt.date
-        px = px.set_index("date").sort_index()
-        px = px.loc[px.index.isin(parity.index)]
-        for c in ("open", "high", "low", "close"):
-            px[c] = pd.to_numeric(px[c], errors="coerce").astype(float)
-
-        # Scale each day's bar so its close matches the parity (raw) close. On days
-        # with no split this factor is ~1.0; across a split it undoes the adjustment.
-        factor = (parity.reindex(px.index) / px["close"]).replace([np.inf, -np.inf], np.nan)
-        factor = factor.ffill().bfill()
-        for c in ("open", "high", "low", "close"):
-            px[c] = px[c] * factor
-        return px[["open", "high", "low", "close"]].dropna()
+        return pd.DataFrame({"open": parity, "high": parity, "low": parity, "close": parity})

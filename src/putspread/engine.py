@@ -152,7 +152,10 @@ class Backtester:
                     "require_earnings_data=True but no earnings calendar was supplied"
                 )
             for sym in self.cfg.symbols:
-                self.calendar.assert_covers(sym, start, end)
+                self.calendar.assert_covers(
+                    sym, start, end,
+                    allow_no_events=sym in self.cfg.non_reporting_symbols,
+                )
         else:
             self.data_caveats.append(
                 "EARNINGS FILTER DISABLED -- trades may span earnings reports."
@@ -249,6 +252,15 @@ class Backtester:
     def _try_open(self, symbol: str, d: date, support_level: float) -> None:
         if support_level != support_level:  # NaN
             return
+        dev = getattr(self.provider, "parity_deviation", lambda *a: None)(symbol, d)
+        if dev is not None and dev > self.cfg.max_parity_deviation:
+            # The day's chain disagrees with where the stock actually closed, so the
+            # quotes are stale or crossed. Pricing an entry off them would invent a
+            # fill that never existed.
+            self.portfolio.rejections.append(
+                (d, symbol, f"stale chain: parity is {dev:.1%} off the close")
+            )
+            return
         r = self.rates.get(d)
         cand = find_candidate(
             symbol, d, support_level, self.provider, self.cfg, self.fills, r,
@@ -259,7 +271,13 @@ class Backtester:
             return
 
         s = cand.spread
-        equity = self.portfolio.equity()
+        # Size off the last MARKED equity, not off cash. Cash still holds the full
+        # credit of every open position while their marks may already be underwater;
+        # sizing off it would grow risk exactly as the book was losing.
+        equity = (
+            self.portfolio.equity_curve[-1][1] if self.portfolio.equity_curve
+            else self.cfg.starting_equity
+        )
         contracts = self.portfolio.size_position(s.max_loss_per_contract, equity)
         if contracts < 1:
             self.portfolio.rejections.append(

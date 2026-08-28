@@ -24,7 +24,9 @@ class RateCurve:
             return cls(pd.Series(dtype=float), fallback)
         df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
         df["date"] = pd.to_datetime(df["date"], utc=True).dt.date
-        s = df.groupby("date")["close"].last().sort_index()
+        # FRED-style files carry `value`; bar-style files carry `close`.
+        col = "value" if "value" in df.columns else "close"
+        s = df.groupby("date")[col].last().sort_index()
         # Source is quoted in percent; convert once, here, and never again.
         return cls(s / 100.0, fallback)
 

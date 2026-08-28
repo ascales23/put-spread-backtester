@@ -9,8 +9,10 @@ not quietly averaged into a headline.
 from __future__ import annotations
 
 import itertools
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
-from typing import Callable, Iterable
+from typing import Callable
 
 import pandas as pd
 
@@ -47,6 +49,28 @@ def _relevant(overrides: dict) -> dict:
     return o
 
 
+#: Set in the parent before forking workers. Children inherit it through copy-on-write,
+#: so the multi-million-row chain frames are loaded once, not once per worker.
+_CTX: BacktestContext | None = None
+_FILLS: FillConfig | None = None
+
+
+def _run_one(payload: tuple[StrategyConfig, dict, int]) -> dict:
+    cfg, overrides, min_trades = payload
+    assert _CTX is not None and _FILLS is not None
+    res = run_backtest(cfg, _CTX, _FILLS)
+    m = compute_metrics(res.trade_frame, res.equity_curve, cfg.starting_equity)
+    row = dict(overrides)
+    row.update(
+        trades=m.n_trades, win_rate=m.win_rate, total_pnl=m.total_pnl,
+        expectancy_per_trade=m.expectancy_per_trade, profit_factor=m.profit_factor,
+        sharpe=m.sharpe, sortino=m.sortino, max_drawdown_pct=m.max_drawdown_pct,
+        worst_trade=m.worst_trade, pnl_skew=m.pnl_skew,
+        enough_trades=m.n_trades >= min_trades,
+    )
+    return row
+
+
 def sweep(
     base: StrategyConfig,
     grid: dict[str, list],
@@ -55,12 +79,20 @@ def sweep(
     start: str | None = None,
     end: str | None = None,
     min_trades: int = 10,
+    n_jobs: int = 1,
 ) -> pd.DataFrame:
-    """Run every parameter combination over one window. Returns one row per set."""
+    """Run every parameter combination over one window. Returns one row per set.
+
+    Parallel workers are forked AFTER the context is loaded, so each child shares the
+    parent's chain frames copy-on-write instead of re-reading gigabytes of parquet.
+    """
+    global _CTX, _FILLS
+
     seen: set[tuple] = set()
-    rows = []
+    jobs = []
     for overrides in expand_grid(grid):
-        key = tuple(sorted(_relevant(overrides).items(), key=lambda kv: str(kv)))
+        rel = _relevant(overrides)
+        key = tuple(sorted(rel.items(), key=lambda kv: str(kv)))
         if key in seen:
             continue
         seen.add(key)
@@ -69,17 +101,13 @@ def sweep(
             cfg = replace(cfg, start=start)
         if end:
             cfg = replace(cfg, end=end)
-        res = run_backtest(cfg, ctx, fills)
-        m = compute_metrics(res.trade_frame, res.equity_curve, cfg.starting_equity)
-        row = {k: v for k, v in _relevant(overrides).items()}
-        row.update(
-            trades=m.n_trades, win_rate=m.win_rate, total_pnl=m.total_pnl,
-            expectancy_per_trade=m.expectancy_per_trade, profit_factor=m.profit_factor,
-            sharpe=m.sharpe, sortino=m.sortino, max_drawdown_pct=m.max_drawdown_pct,
-            worst_trade=m.worst_trade, pnl_skew=m.pnl_skew,
-            enough_trades=m.n_trades >= min_trades,
-        )
-        rows.append(row)
+        jobs.append((cfg, rel, min_trades))
+
+    _CTX, _FILLS = ctx, fills
+    if n_jobs <= 1:
+        return pd.DataFrame([_run_one(j) for j in jobs])
+    with ProcessPoolExecutor(max_workers=n_jobs, mp_context=mp.get_context("fork")) as ex:
+        rows = list(ex.map(_run_one, jobs, chunksize=1))
     return pd.DataFrame(rows)
 
 
@@ -126,6 +154,7 @@ def walk_forward(
     train_years: float = 2.0,
     objective: Objective = default_objective,
     min_trades: int = 10,
+    n_jobs: int = 1,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Optimize in-sample per fold, then measure the SAME set out-of-sample.
 
@@ -136,7 +165,8 @@ def walk_forward(
     fold_rows, chosen_rows = [], []
 
     for i, fold in enumerate(folds, 1):
-        is_tbl = sweep(base, grid, ctx, fills, fold["train_start"], fold["train_end"], min_trades)
+        is_tbl = sweep(base, grid, ctx, fills, fold["train_start"], fold["train_end"],
+                       min_trades, n_jobs)
         if is_tbl.empty:
             continue
         scores = is_tbl.apply(objective, axis=1)
