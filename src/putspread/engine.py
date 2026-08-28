@@ -45,6 +45,7 @@ class BacktestResult:
     rejections: pd.DataFrame
     data_caveats: list[str] = field(default_factory=list)
     signals_seen: int = 0
+    margin_breaches: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     @property
     def trade_frame(self) -> pd.DataFrame:
@@ -276,10 +277,13 @@ class Backtester:
             self.portfolio.equity_curve, columns=["date", "equity", "open_risk"]
         ).set_index("date")
         rej = pd.DataFrame(self.portfolio.rejections, columns=["date", "symbol", "reason"])
+        breaches = pd.DataFrame(
+            self.portfolio.margin_breaches, columns=["date", "equity", "open_risk"]
+        )
         return BacktestResult(
             cfg=self.cfg, fills=self.fills, trades=self.portfolio.closed,
             equity_curve=eq, rejections=rej, data_caveats=self.data_caveats,
-            signals_seen=signals_seen,
+            signals_seen=signals_seen, margin_breaches=breaches,
         )
 
     # ------------------------------------------------------------------ helpers

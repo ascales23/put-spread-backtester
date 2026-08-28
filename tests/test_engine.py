@@ -312,3 +312,52 @@ def test_support_level_is_known_before_the_bar_that_touches_it():
         upto = support_series(bars.iloc[:t], cfg)
         if not np.isnan(full.iloc[t - 1]):
             assert upto.iloc[t - 1] == pytest.approx(full.iloc[t - 1])
+
+
+# ------------------------------------------------------- leverage and margin
+
+
+def test_leverage_scales_position_size_linearly():
+    cfg = StrategyConfig(starting_equity=100_000, max_risk_per_position_pct=0.02,
+                         max_portfolio_risk_pct=0.10, require_earnings_data=False)
+    p1 = Portfolio(cfg)
+    p4 = Portfolio(cfg.with_(leverage=4.0))
+    assert p1.size_position(500.0, 100_000) == 4        # 2% of 100k / 500
+    assert p4.size_position(500.0, 100_000) == 16       # four times the risk budget
+
+
+def test_margin_ceiling_binds_before_the_risk_caps_at_high_leverage():
+    """A defined-risk vertical is margined at its full max loss, so total open risk
+    can never exceed equity no matter how high leverage is set. This is the
+    constraint that makes leverage saturate instead of scaling forever."""
+    cfg = StrategyConfig(starting_equity=100_000, max_risk_per_position_pct=1.0,
+                         max_portfolio_risk_pct=1.0, leverage=20.0,
+                         max_margin_utilization=1.0, require_earnings_data=False)
+    p = Portfolio(cfg)
+    # Risk caps would allow 20x equity; margin allows exactly equity.
+    assert p.size_position(1_000.0, 100_000) == 100     # $100k / $1k, not $2m / $1k
+    p.positions.append(pos(max_loss_per_contract=1_000.0, contracts=100))
+    assert p.size_position(1_000.0, 100_000) == 0       # margin fully committed
+
+
+def test_margin_breach_is_recorded_when_losses_eat_the_equity():
+    """Sizing cannot create a breach; only losses can, by shrinking equity under
+    positions already on. That is exactly when a real account is liquidated."""
+    cfg = StrategyConfig(starting_equity=10_000, require_earnings_data=False)
+    p = Portfolio(cfg)
+    p.positions.append(pos(max_loss_per_contract=1_000.0, contracts=9))
+    p.record_equity(date(2024, 3, 1), 0.0)              # equity 10k vs risk 9k -- fine
+    assert p.margin_breaches == []
+    p.record_equity(date(2024, 3, 2), -2_000.0)         # equity 8k vs risk 9k -- breach
+    assert len(p.margin_breaches) == 1
+    assert p.margin_breaches[0][0] == date(2024, 3, 2)
+
+
+def test_leverage_does_not_change_per_contract_max_loss():
+    """Leverage buys more contracts; it never makes a single spread riskier. The
+    defined-risk structure is what keeps ruin off the table."""
+    cfg = StrategyConfig(require_earnings_data=False, leverage=8.0)
+    p = Portfolio(cfg)
+    n = p.size_position(750.0, 100_000)
+    assert n * 750.0 <= cfg.max_margin_utilization * 100_000
+    assert pos(max_loss_per_contract=750.0, contracts=n).risk_dollars == 750.0 * n

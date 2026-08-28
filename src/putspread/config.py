@@ -93,6 +93,14 @@ class StrategyConfig:
     max_portfolio_risk_pct: float = 0.10     # total open max-loss / equity
     max_risk_per_position_pct: float = 0.02
     max_concurrent_positions: int = 10
+    #: Multiplies BOTH risk caps below. 1.0 is the STRATEGY.md section 4 sizing;
+    #: 4.0 puts four times the max loss to work per unit of equity.
+    leverage: float = 1.0
+    #: Hard broker constraint, not a preference. A defined-risk vertical is margined
+    #: at its full max loss, so total open max loss can never exceed the account's
+    #: equity -- there is nothing left to post. This is what makes leverage saturate
+    #: rather than scale forever, and it binds before any of the caps above do.
+    max_margin_utilization: float = 1.0
     one_position_per_symbol: bool = True
 
     # --- misc

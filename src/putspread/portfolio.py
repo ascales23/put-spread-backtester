@@ -110,6 +110,10 @@ class Portfolio:
     closed: list[ClosedTrade] = field(default_factory=list)
     equity_curve: list[tuple[date, float, float]] = field(default_factory=list)  # (date, equity, open_risk)
     rejections: list[tuple[date, str, str]] = field(default_factory=list)
+    #: Dates where open max loss exceeded equity. Sizing cannot create this -- only
+    #: losses can, by shrinking equity under positions already on. A real account
+    #: gets a margin call here and is liquidated at the worst possible moment.
+    margin_breaches: list[tuple[date, float, float]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.cash == 0.0:
@@ -127,18 +131,25 @@ class Portfolio:
         return self.cash + open_pnl
 
     def size_position(self, max_loss_per_contract: float, equity: float) -> int:
-        """Contracts to trade, enforcing BOTH the per-position and portfolio caps.
+        """Contracts to trade, enforcing the per-position cap, the portfolio cap, and
+        the broker's margin limit.
 
         Section 4 calls the account-level cap "the dominant driver of long-run
         survival", so it is applied to the total open max loss, not per trade.
-        Returns 0 when even one contract would breach a cap -- the trade is skipped,
-        never partially taken.
+        `leverage` scales both caps; margin does NOT scale, because a defined-risk
+        vertical is margined at its full max loss and an account cannot post more
+        margin than it has. That third constraint is what makes leverage saturate.
+
+        Returns 0 when even one contract would breach a limit -- the trade is
+        skipped, never partially taken.
         """
         if max_loss_per_contract <= 0:
             return 0
-        per_position_budget = self.cfg.max_risk_per_position_pct * equity
-        portfolio_budget = self.cfg.max_portfolio_risk_pct * equity - self.open_risk
-        budget = min(per_position_budget, portfolio_budget)
+        lev = self.cfg.leverage
+        per_position_budget = self.cfg.max_risk_per_position_pct * lev * equity
+        portfolio_budget = self.cfg.max_portfolio_risk_pct * lev * equity - self.open_risk
+        margin_budget = self.cfg.max_margin_utilization * equity - self.open_risk
+        budget = min(per_position_budget, portfolio_budget, margin_budget)
         if budget <= 0:
             return 0
         return max(int(math.floor(budget / max_loss_per_contract)), 0)
@@ -186,4 +197,7 @@ class Portfolio:
         return trade
 
     def record_equity(self, d: date, open_pnl: float) -> None:
-        self.equity_curve.append((d, self.equity(open_pnl), self.open_risk))
+        eq = self.equity(open_pnl)
+        self.equity_curve.append((d, eq, self.open_risk))
+        if self.open_risk > eq:
+            self.margin_breaches.append((d, eq, self.open_risk))

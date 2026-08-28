@@ -129,6 +129,54 @@ this is enforced structurally and tested:
 The honest limitation: burn-in consumes 2020&ndash;21, so the filter cannot be
 evaluated on the earliest period at all.
 
+## Leverage
+
+`StrategyConfig.leverage` multiplies both §4 risk caps. It does **not** multiply
+margin: a defined-risk vertical is margined at its full max loss, so total open risk
+can never exceed equity. That third constraint is what makes leverage saturate.
+
+```bash
+python scripts/run_leverage.py --out runs/leverage
+```
+
+**ML-filtered strategy, realistic fills, across the leverage ladder:**
+
+| Leverage | Total P&L | CAGR | Max DD | Sharpe | Peak risk/equity | Margin breaches |
+|---|---|---|---|---|---|---|
+| 1x | $11,946 | 1.7% | −3.8% | **0.59** | 10% | 0 |
+| 2x | $25,733 | 3.5% | −9.5% | 0.53 | 21% | 0 |
+| **4x** | **$50,356** | **6.4%** | **−23.7%** | 0.49 | 47% | 0 |
+| 6x | $79,377 | 9.3% | −35.9% | 0.52 | 79% | 0 |
+| 8x | $114,681 | 12.3% | −47.9% | 0.55 | 123% | 4 |
+| 10x | $144,507 | 14.5% | −58.6% | 0.57 | 181% | 19 |
+
+**4x roughly quadruples P&L and multiplies drawdown by 6.2×.** Sharpe *falls*, which
+is the tell: leverage is buying return with disproportionate risk, not improving the
+strategy. Beyond ~7x the margin ceiling binds and the account takes margin calls.
+
+`peak_risk_pct` is the number that matters most for a defined-risk book: the largest
+fraction of equity simultaneously at max loss. At 4x that is **47%** — if every open
+spread finished below its long strike on the same day, the account loses 47%. That is
+arithmetic, not a tail estimate, and it is the risk a 92% win rate conceals. These are
+correlated large-cap tech names; one market-wide gap is exactly the event that breaches
+every short strike at once.
+
+A 2,000-path block bootstrap of the daily sequence (blocks preserve loss clustering):
+
+| Leverage | Median return | 5th pct return | Median DD | Worst-5% DD | P(DD > 25%) | Ruin |
+|---|---|---|---|---|---|---|
+| 1x | +12.2% | +0.8% | −5.2% | −8.9% | 0.0% | 0% |
+| 4x | +53.7% | −14.3% | −27.9% | −44.9% | **63.3%** | 0% |
+| 8x | +124.3% | −36.2% | −51.9% | −74.4% | 99.8% | 0% |
+
+Ruin stays at zero at every level — the defined-risk structure genuinely caps it, and
+that is leverage's one real argument here.
+
+**The filter earns its keep only under leverage.** At 1x it makes less money than
+unfiltered ($11,946 vs $15,194). At 8x it makes far more ($114,681 vs $93,917), and at
+10x nearly double ($144,507 vs $87,860). Its value is drawdown reduction, and
+compounding rewards that superlinearly.
+
 ## Layout
 
 ```
