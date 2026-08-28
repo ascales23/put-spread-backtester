@@ -135,7 +135,10 @@ def make_folds(start: str, end: str, n_folds: int = 4, train_years: float = 2.0)
     while True:
         tr_start, tr_end = cursor, cursor + pd.Timedelta(days=train_days)
         te_start, te_end = tr_end + pd.Timedelta(days=1), tr_end + pd.Timedelta(days=test_days)
-        if te_start >= e:
+        # A final sliver of a test window (a few sessions, often zero trades) is not
+        # an out-of-sample result; reporting one would dilute the fold tally with a
+        # fold that could never have confirmed anything.
+        if te_start >= e or (min(te_end, e) - te_start).days < 60:
             break
         folds.append({
             "train_start": str(tr_start.date()), "train_end": str(tr_end.date()),

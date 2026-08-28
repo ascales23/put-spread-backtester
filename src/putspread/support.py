@@ -59,6 +59,16 @@ def support_series(bars: pd.DataFrame, cfg: SupportConfig) -> pd.Series:
     n = len(bars)
     levels = np.full(n, np.nan)
 
+    # The level in force on day t is the one a trader identified at the close of day
+    # t-1, so every comparison below uses the PRIOR close. Using today's close would
+    # define support as "somewhere under wherever we ended up today", which forces the
+    # level below today's close by construction -- and that quietly destroys the
+    # section 3.2 A/B test, because a bar can then never close below its own support
+    # and "confirmation" degenerates into "mechanical".
+    prev_close = np.empty(n)
+    prev_close[0] = np.nan
+    prev_close[1:] = close[:-1]
+
     if cfg.method == "pivot_low":
         pivots = confirmed_pivot_lows(low, cfg.pivot_left, cfg.pivot_right)
         for t in range(n):
@@ -66,8 +76,8 @@ def support_series(bars: pd.DataFrame, cfg: SupportConfig) -> pd.Series:
             if len(usable) == 0:
                 continue
             vals = low[usable[:, 0]]
-            # Nearest confirmed pivot low that still sits below the current price.
-            below = vals[vals < close[t]]
+            # Nearest confirmed pivot low that sat below yesterday's close.
+            below = vals[vals < prev_close[t]]
             if len(below):
                 levels[t] = below.max()
 
@@ -82,8 +92,9 @@ def support_series(bars: pd.DataFrame, cfg: SupportConfig) -> pd.Series:
     else:
         raise ValueError(f"unknown support method {cfg.method!r}")
 
-    # A level is only a "pullback target" if it sits a sane distance below price.
-    dist = (close - levels) / close
+    # A level is only a "pullback target" if it sat a sane distance below yesterday's
+    # price -- close enough to be reachable, far enough to be an actual pullback.
+    dist = (prev_close - levels) / prev_close
     levels = np.where(
         (dist >= cfg.min_distance_pct) & (dist <= cfg.max_distance_pct), levels, np.nan
     )
@@ -95,13 +106,14 @@ def entry_signals(
 ) -> pd.Series:
     """Boolean series: True on bars where an entry is triggered.
 
-    mechanical  -- the bar's LOW touches or breaches the support level, and the prior
-                   bar closed above it (so this is a fresh pullback into the level,
-                   not day three of sitting on it).
-    confirmation -- after such a touch, wait for a close back ABOVE the level within
-                   `confirmation_bars` bars, and enter on that bar's close. Worse
-                   entry price, but it declines the trades where the level is failing,
-                   which is exactly where this strategy's max loss comes from.
+    mechanical  -- the bar's LOW touches or breaches the support level. Only the FIRST
+                   such bar counts; day three of sitting on the level is not a new
+                   pullback.
+    confirmation -- the same touch, but enter only once a bar CLOSES back above the
+                   level, within `confirmation_bars` bars. Worse entry price, but it
+                   declines the trades where the level is breaking, which is exactly
+                   where this strategy's max loss comes from. A touch that never
+                   closes back above is never taken.
 
     In both cases entry is priced at the CLOSE of the signal bar, using that day's
     end-of-day chain -- the only quotes the data actually contains.
@@ -115,17 +127,20 @@ def entry_signals(
     for t in range(1, n):
         if np.isnan(lvl[t]):
             continue
-        if low[t] <= lvl[t] and close[t - 1] > lvl[t]:
+        if low[t] <= lvl[t]:
             touch[t] = True
 
+    # Only the first bar of a touch sequence is an entry opportunity.
+    fresh = touch & ~np.concatenate(([False], touch[:-1]))
+
     if discipline == "mechanical":
-        return pd.Series(touch, index=bars.index, name="entry")
+        return pd.Series(fresh, index=bars.index, name="entry")
 
     if discipline != "confirmation":
         raise ValueError(f"unknown entry discipline {discipline!r}")
 
     signal = np.zeros(n, dtype=bool)
-    for t in np.flatnonzero(touch):
+    for t in np.flatnonzero(fresh):
         level = lvl[t]
         # The touch bar itself counts: a bar that dips to support and closes back
         # above it is the classic intraday reversal the spec calls out.

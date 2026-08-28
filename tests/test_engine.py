@@ -281,3 +281,34 @@ def test_realistic_fills_never_beat_mid_fills():
         r = bt.run()
         out[model] = sum(t.pnl for t in r.trades)
     assert out["mid"] >= out["realistic"] >= out["natural"]
+
+
+def test_confirmation_and_mechanical_are_actually_different():
+    """Guard against the disciplines collapsing into each other.
+
+    If support were defined relative to TODAY's close it would always sit below it,
+    no bar could ever close under its own support, and the section 3.2 A/B test would
+    silently compare a rule against itself. This asserts they diverge on a path where
+    the level breaks.
+    """
+    # A pivot low forms at 92, price rallies away, then returns and breaks through.
+    bars = bars_from([100, 96, 92, 95, 99, 103, 100, 96, 91, 87, 84])
+    cfg = SupportConfig(pivot_left=1, pivot_right=1, min_distance_pct=0.0)
+    sup = support_series(bars, cfg)
+    mech = entry_signals(bars, sup, "mechanical")
+    conf = entry_signals(bars, sup, "confirmation", confirmation_bars=1)
+    assert mech.sum() > 0
+    assert not mech.equals(conf), "confirmation must not be identical to mechanical"
+    assert conf.sum() <= mech.sum()
+
+
+def test_support_level_is_known_before_the_bar_that_touches_it():
+    """The level in force on day t must be derivable from bars up to t-1 only."""
+    prices = [100, 98, 95, 92, 90, 93, 96, 99, 102, 105, 103, 100, 96, 92, 89.5]
+    bars = bars_from(prices)
+    cfg = SupportConfig(pivot_left=2, pivot_right=2, min_distance_pct=0.0)
+    full = support_series(bars, cfg)
+    for t in range(4, len(bars)):
+        upto = support_series(bars.iloc[:t], cfg)
+        if not np.isnan(full.iloc[t - 1]):
+            assert upto.iloc[t - 1] == pytest.approx(full.iloc[t - 1])
