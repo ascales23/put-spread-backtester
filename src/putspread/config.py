@@ -129,3 +129,61 @@ SWEEP_GRID: dict[str, list] = {
     "stop_rule": ["none", "level_break", "credit_multiple"],
     "time_stop_dte": [None, 21, 14, 7],
 }
+
+
+#: The universe this strategy is actually run on: liquid, optionable, and volatile
+#: enough that the credit is worth collecting.
+SHIPPED_UNIVERSE = (
+    "AMD", "NVDA", "TSLA", "META", "AAPL", "MSFT", "AMZN", "GOOGL",
+    "NFLX", "MU", "AVGO", "SMCI", "COIN", "PLTR", "SPY",
+)
+
+
+def shipped_config(leverage: float = 1.0, **overrides) -> StrategyConfig:
+    """The chosen live configuration, in one place so it cannot drift.
+
+    Entry: 5% buffer below support, 14 DTE. Chosen by the sweep, and the only fixed
+    structure whose edge survived pessimistic fills.
+
+    Exits: take profit at 50% of max credit, stop at 2.5x credit received, and close
+    at 3 DTE regardless. At 4x leverage this is the best configuration measured --
+    $94,335 at profit factor 1.76, Sharpe 0.95 and a 13.0% drawdown, against $50,356
+    / 1.40 / 0.49 / 23.7% for the same strategy with no stop.
+
+    The stop LEVEL is not from the P&L sweep. It comes from the excursion study: the
+    median losing trade digs to 3.26x credit underwater while the median winner
+    reaches only 0.14x, and only 3.8% of winners ever reach the median loser's depth.
+    A 2.5x stop therefore catches ~63% of losers while cutting ~5.2% of winners.
+
+    THE ASSUMPTION THIS CONFIG RESTS ON, stated plainly because every number above
+    depends on it: roughly 95% of the profit-target and stop exits fill at a
+    Black-Scholes mark rather than at a quoted market, because this chain source does
+    not quote an open position's contract every day. Set
+    `require_real_quotes_for_exit=True` for the conservative bound, where the stop
+    fires once in 182 trades and the whole thing collapses toward hold-to-expiry
+    (~$58,952 at 4x, Sharpe 0.53, drawdown 28.5%). Both runs ship; the modelled-exit
+    figures are the headline and the real-quote figures are the floor.
+
+    The time stop is included on the same basis as the stop itself. Its measured
+    benefit is large but, like the stop's, disappears under real-quote exits -- so it
+    is kept or dropped with the stop, not judged separately.
+
+    Deliberately NOT included: the level-break stop. It triggers on the underlying
+    closing below support, which happens constantly in noise, and it turns a 92% win
+    rate into 53% for -$23,855. That result needs no modelled price to be believed,
+    which is exactly why it is the one exit conclusion that is safe to act on.
+    """
+    cfg = StrategyConfig(
+        symbols=SHIPPED_UNIVERSE,
+        short_strike_method="buffer",
+        buffer_pct=0.05,
+        target_dte=14,
+        profit_target_pct=0.50,
+        stop_rule="credit_multiple",
+        stop_credit_multiple=2.5,
+        time_stop_dte=3,
+        leverage=leverage,
+        acknowledge_missing_oi_volume=True,
+        support=SupportConfig(),
+    )
+    return cfg.with_(**overrides) if overrides else cfg

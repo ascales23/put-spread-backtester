@@ -29,10 +29,12 @@ def build_cfg(a) -> StrategyConfig:
         entry_discipline=a.entry, short_strike_method=a.method,
         buffer_pct=a.buffer, target_short_delta=a.delta,
         max_loss_per_contract=a.max_loss, target_dte=a.dte, dte_tolerance=a.dte_tol,
-        profit_target_pct=a.profit_target, stop_rule=a.stop, time_stop_dte=a.time_stop,
+        profit_target_pct=a.profit_target, stop_rule=a.stop,
+        stop_credit_multiple=a.stop_mult, time_stop_dte=a.time_stop,
         starting_equity=a.equity, max_portfolio_risk_pct=a.portfolio_risk,
         max_risk_per_position_pct=a.position_risk,
         acknowledge_missing_oi_volume=True,     # this source carries no OI/volume
+        require_real_quotes_for_exit=a.real_quote_exits,
         support=SupportConfig(method=a.support, lookback_days=a.support_lookback),
     )
 
@@ -44,14 +46,17 @@ def main() -> int:
     p.add_argument("--end", default="2026-08-26")
     p.add_argument("--entry", default="mechanical", choices=["mechanical", "confirmation"])
     p.add_argument("--method", default="buffer", choices=["buffer", "delta", "prob_otm"])
-    p.add_argument("--buffer", type=float, default=0.03)
+    p.add_argument("--buffer", type=float, default=0.05)
     p.add_argument("--delta", type=float, default=0.20)
     p.add_argument("--max-loss", type=float, default=1500.0)
-    p.add_argument("--dte", type=int, default=22)
+    p.add_argument("--dte", type=int, default=14)
     p.add_argument("--dte-tol", type=int, default=7)
-    p.add_argument("--profit-target", type=float, default=None)
-    p.add_argument("--stop", default="none", choices=["none", "level_break", "credit_multiple"])
-    p.add_argument("--time-stop", type=int, default=None)
+    p.add_argument("--profit-target", type=float, default=0.50)
+    p.add_argument("--stop", default="credit_multiple",
+                   choices=["none", "level_break", "credit_multiple"])
+    p.add_argument("--stop-mult", type=float, default=2.5,
+                   help="stop when the mark-to-market loss reaches N x credit received")
+    p.add_argument("--time-stop", type=int, default=3)
     p.add_argument("--support", default="pivot_low", choices=["pivot_low", "donchian", "sma"])
     p.add_argument("--support-lookback", type=int, default=120)
     p.add_argument("--equity", type=float, default=100_000.0)
@@ -62,6 +67,8 @@ def main() -> int:
     p.add_argument("--data", default="data")
     p.add_argument("--out", default="runs/backtest.html")
     p.add_argument("--no-sensitivity", action="store_true")
+    p.add_argument("--real-quote-exits", action="store_true",
+                   help="only act on an early exit when the strikes are actually quoted")
     a = p.parse_args()
 
     cfg = build_cfg(a)

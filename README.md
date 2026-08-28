@@ -9,6 +9,51 @@ Everything runs against **real historical option chains** — real per-strike bi
 and implied vol, real earnings dates. Nothing in any reported result comes from
 synthetic data.
 
+## Shipped configuration
+
+`putspread.config.shipped_config(leverage=...)` — one place, so it cannot drift.
+
+| | |
+|---|---|
+| Universe | 15 liquid, volatile optionable names + SPY |
+| Entry | 5% buffer below mechanical support, 14 DTE |
+| Selection | walk-forward XGBoost tail-risk filter |
+| Take profit | 50% of max credit |
+| Stop loss | **2.5× credit received** |
+| Time stop | 3 DTE |
+| Off | level-break stop |
+
+The stop *level* is not from the P&L sweep — it comes from the excursion study. The
+median losing trade digs to 3.26× credit underwater while the median winner reaches
+only 0.14×, and just 3.8% of winners ever reach the median loser's depth, so a 2.5×
+stop catches ~63% of losers while cutting ~5.2% of winners.
+
+**Headline (exits may fill at modelled marks):**
+
+| Leverage | Trades | Win | P&L | PF | Sharpe | Max DD | Bootstrap 5th pct | P(DD>25%) |
+|---|---|---|---|---|---|---|---|---|
+| 1× | 227 | 82.8% | $11,342 | 1.65 | 0.73 | −3.3% | +2.5% | 0% |
+| 2× | 224 | 82.6% | $32,022 | 1.68 | 0.82 | −7.0% | +8.0% | 0% |
+| **4×** | 224 | 82.6% | **$94,335** | **1.76** | **0.95** | **−13.0%** | **+27.3%** | 6.5% |
+
+**Floor (`require_real_quotes_for_exit=True`):**
+
+| Leverage | Trades | P&L | PF | Sharpe | Max DD | Stops fired | Time stops |
+|---|---|---|---|---|---|---|---|
+| 1× | 183 | $13,380 | 1.63 | 0.56 | −4.7% | 1 | 0 |
+| 2× | 180 | $28,332 | 1.51 | 0.53 | −12.6% | 1 | 0 |
+| 4× | 182 | $58,952 | 1.46 | 0.53 | −28.5% | 1 | 0 |
+
+**Read both.** The headline assumes ~95% of profit-target and stop exits fill at a
+Black-Scholes mark, because this chain source does not quote an open position's
+contract every day. The floor refuses to fill any exit without a quoted market — and
+there the stop fires once in 182 trades and the strategy collapses toward
+hold-to-expiry. The truth is somewhere between, and this data cannot locate it.
+
+What the managed exits do change, if you accept them, is the shape of leverage risk:
+at 4× the bootstrap 5th-percentile outcome moves from −14.3% (no stop) to **+27.3%**,
+and the chance of a 25% drawdown falls from 63% to 6.5%.
+
 ## Data
 
 | What | Source | Coverage |
