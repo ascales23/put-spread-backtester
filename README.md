@@ -54,6 +54,63 @@ What the managed exits do change, if you accept them, is the shape of leverage r
 at 4× the bootstrap 5th-percentile outcome moves from −14.3% (no stop) to **+27.3%**,
 and the chance of a 25% drawdown falls from 63% to 6.5%.
 
+## Crash stress test
+
+```bash
+python scripts/stress_2020.py --out runs/stress2020   # replay Feb-Mar 2020
+python scripts/gap_stress.py  --out runs/gapstress    # instantaneous gap, every book
+```
+
+### The 2020 replay does not test the strategy — it stands aside
+
+SPY fell 34.1% peak-to-trough and the chain data samples 19 sessions inside that
+window, including 24 Feb, 9 Mar, 16 Mar and the 23 Mar bottom. Replaying it, the book
+is **completely flat from 2 March onward**, straight through the crash.
+
+27 signals fired; 26 were rejected, by the strategy's own mandatory controls:
+
+| Rejection | Count | What it is |
+|---|---|---|
+| No long strike fits the $1,500 max-loss budget | 11 | §4 risk budget refusing an oversized defined risk |
+| Bid/ask wider than 12% of mid | 13 | §6.3 liquidity filter — spreads hit 17%, 22%, 39%, **69.6%** |
+| Stale chain / no listed strike | 2 | data-integrity gates |
+
+Both controls doing exactly their job, hardest on the worst days. **But this is not
+proof of safety.** The budget rejections are partly a data artifact: with only ~27
+strikes per expiry and 25-point wing gaps, the nearest long strike is far away, the
+width is large, and the trade breaches the budget. On a dense chain a closer long
+strike exists and many of those trades *would* have been taken. The book was never
+full when the gap came, so the crash never tested it.
+
+### So ask the question directly
+
+For every session in the backtest, take the book actually open that day and price an
+instantaneous market-wide decline. These are defined-risk verticals, so any underlying
+gapping below its long strike delivers exactly its max loss — the answer is closed-form,
+not simulated.
+
+**Loss as a fraction of equity, worst session in the backtest:**
+
+| Leverage | Peak open risk | −10% gap | −20% gap | −34% gap | −50% gap | Median day (−34%) |
+|---|---|---|---|---|---|---|
+| 1× | 10.0% | −9.1% | −10.0% | −10.0% | −10.0% | −1.8% |
+| 2× | 20.5% | −17.9% | −20.4% | −20.5% | −20.5% | −3.9% |
+| **4×** | **42.9%** | **−36.4%** | −42.4% | **−42.9%** | −42.9% | −7.8% |
+| 6× | 66.6% | −56.6% | −65.6% | −66.6% | −66.6% | −11.9% |
+
+**The loss saturates almost immediately.** At 4×, a *10%* decline already costs 36.4%
+of the account — 85% of the worst case. Going from a 10% gap to a 34% one adds only
+6.5 more points, because the short strikes sit just 5–15% below spot and a modest
+decline already puts the whole book through its long strikes.
+
+So the honest answer on leverage: **it survives — no ruin, the defined-risk cap holds
+exactly — but a bad day costs roughly 43% of the account at 4×, and you do not need a
+once-in-a-decade crash to get there.** A routine 10% market drop with a full book does
+almost all of the damage.
+
+The worst exposure in the whole history was **2025-04-07**, not 2020. The strategy
+was flat in March 2020 and fully loaded during the April 2025 selloff.
+
 ## Data
 
 | What | Source | Coverage |
