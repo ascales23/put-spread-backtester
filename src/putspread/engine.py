@@ -11,19 +11,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Callable
 
 import pandas as pd
 
 from .chain import ChainProvider, ExpiryChain, year_fraction
 from .config import StrategyConfig
 from .earnings import EarningsCalendar
-from .evaluate import find_candidate
+from .evaluate import Candidate, find_candidate
 from .exits import MarkState, evaluate_exits
 from .fills import FillConfig
 from .portfolio import ClosedTrade, OpenPosition, Portfolio
 from .rates import RateCurve
 from .spread import CONTRACT_MULTIPLIER, LegQuote, payoff_at_expiry_per_contract, spread_mark_per_contract
 from .support import entry_signals, support_series
+
+#: A learned or hand-written gate on candidate trades. Returns (take, reason).
+TradeFilter = Callable[[str, date, "Candidate"], tuple[bool, str]]
+
+#: Chooses the ENTRY STRUCTURE for one opportunity: returns config overrides for
+#: strike selection and expiry, or None to decline the opportunity entirely.
+EntrySelector = Callable[[str, date], "dict | None"]
 
 
 @dataclass
@@ -57,6 +65,8 @@ class Backtester:
         rates: RateCurve,
         calendar: EarningsCalendar | None,
         data_caveats: list[str] | None = None,
+        trade_filter: "TradeFilter | None" = None,
+        entry_selector: "EntrySelector | None" = None,
     ) -> None:
         self.provider = provider
         self.bars = bars
@@ -65,6 +75,8 @@ class Backtester:
         self.rates = rates
         self.calendar = calendar
         self.data_caveats = list(data_caveats or [])
+        self.trade_filter = trade_filter
+        self.entry_selector = entry_selector
         self.portfolio = Portfolio(cfg)
 
     # ------------------------------------------------------------------ marks
@@ -138,6 +150,44 @@ class Backtester:
         return self.portfolio.close_position(
             pos, d, mark.debit_to_close, mark.spot, reason, exit_commission
         )
+
+    def simulate_isolated(self, pos: OpenPosition) -> ClosedTrade | None:
+        """Walk ONE position to its exit, ignoring every portfolio constraint.
+
+        Used to harvest the outcome of every *candidate* trade, not just the ones a
+        capital-constrained book happened to take. Training a filter only on the
+        trades the portfolio accepted would teach it the portfolio's queueing rules
+        rather than the market's behaviour. Exit logic is the engine's own, so a
+        harvested outcome and a backtested one cannot drift apart.
+
+        Returns None if the data ends before the position resolves.
+        """
+        book = Portfolio(self.cfg)
+        saved, self.portfolio = self.portfolio, book
+        try:
+            book.open_position(pos)
+            for d in self.bars[pos.symbol].index:
+                if d <= pos.entry_date:
+                    continue
+                spot = self._spot_for(pos.symbol, d)
+                if spot is None:
+                    continue
+                mark = self.mark_position(pos, d, spot)
+                open_pnl = (
+                    (pos.credit_per_share - mark.debit_to_close)
+                    * CONTRACT_MULTIPLIER * pos.contracts
+                )
+                pos.worst_mark = min(pos.worst_mark, open_pnl)
+                pos.best_mark = max(pos.best_mark, open_pnl)
+                if d >= pos.expiration:
+                    settle_spot = self._spot_for(pos.symbol, pos.expiration) or spot
+                    return self._settle_at_expiry(pos, pos.expiration, settle_spot)
+                reason = evaluate_exits(pos, mark, self.cfg)
+                if reason:
+                    return self._close_early(pos, d, mark, reason)
+            return None
+        finally:
+            self.portfolio = saved
 
     # ------------------------------------------------------------------ run
 
@@ -261,14 +311,34 @@ class Backtester:
                 (d, symbol, f"stale chain: parity is {dev:.1%} off the close")
             )
             return
+        # A learned selector may pick this trade's structure -- which strike rule and
+        # which expiry -- per opportunity, instead of one structure for all time. It
+        # sees only the symbol and date; the candidate does not exist yet.
+        entry_cfg = self.cfg
+        if self.entry_selector is not None:
+            overrides = self.entry_selector(symbol, d)
+            if overrides is None:
+                self.portfolio.rejections.append((d, symbol, "selector: declined"))
+                return
+            entry_cfg = self.cfg.with_(**overrides)
+
         r = self.rates.get(d)
         cand = find_candidate(
-            symbol, d, support_level, self.provider, self.cfg, self.fills, r,
+            symbol, d, support_level, self.provider, entry_cfg, self.fills, r,
             self.calendar,
         )
         if not cand.accepted or cand.spread is None:
             self.portfolio.rejections.append((d, symbol, cand.reject_reason or "rejected"))
             return
+
+        # An optional learned filter gets the last word on whether to take the trade.
+        # It sees only the candidate's entry-time features; it cannot see the outcome,
+        # and a walk-forward filter refuses to score a date its training window covered.
+        if self.trade_filter is not None:
+            take, why = self.trade_filter(symbol, d, cand)
+            if not take:
+                self.portfolio.rejections.append((d, symbol, f"filter: {why}"))
+                return
 
         s = cand.spread
         # Size off the last MARKED equity, not off cash. Cash still holds the full
